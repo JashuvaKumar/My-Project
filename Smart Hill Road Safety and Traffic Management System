@@ -1,0 +1,210 @@
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
+#include <DHT.h>
+
+// --- WiFi Credentials ---
+const char* ssid = "HillRoadSafety";
+const char* password = "12345678";
+
+// --- Pin Definitions ---
+#define DHTPIN 23          // GPIO23 for DHT11 data pin
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+const int LED1 = 18;   // Left-side Green LED
+const int LED2 = 19;   // Left-side Red LED
+const int LED3 = 21;   // Right-side Green LED
+const int LED4 = 22;   // Right-side Red LED
+
+const int touchPad1 = T0;  // GPIO4
+const int touchPad2 = T3;  // GPIO15
+
+const int TOUCH_THRESHOLD = 50;
+
+// --- Server Instance ---
+AsyncWebServer server(80);
+
+// --- Sensor Data Variables ---
+float temperature = 0.0;
+float humidity = 0.0;
+String t1State = "Not Touched";
+String t2State = "Not Touched";
+
+// HTML Page
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Smart Hill Road Safety and Traffic Management System</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: 'Segoe UI', sans-serif;
+      background: linear-gradient(135deg, #08669c, #2a58ba);
+      background-size: 300% 300%;
+      animation: gradientMove 20s ease infinite;
+      color: #f0e8e8;
+    }
+    @keyframes gradientMove {
+      0% { background-position: 0% 50%; }
+      50% { background-position: 100% 50%; }
+      100% { background-position: 0% 50%; }
+    }
+    .dashboard {
+      max-width: 1200px;
+      margin: auto;
+      padding: 40px 20px;
+    }
+    header {
+      text-align: center;
+      margin-bottom: 40px;
+    }
+    header h1 {
+      font-size: 2.8em;
+      margin-bottom: 10px;
+      color: #ffffff;
+    }
+    header p {
+      font-size: 1.2em;
+      color: #ffffff;
+    }
+    .sensor-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 25px;
+      margin-bottom: 50px;
+    }
+    .sensor-card {
+      text-align: center;
+      padding: 25px;
+      border-radius: 15px;
+      background: rgba(255, 255, 255, 0.1);
+      backdrop-filter: blur(10px);
+      border: 1px solid rgb(143, 179, 218);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15);
+      transition: transform 0.3s ease, box-shadow 0.3s ease;
+    }
+    .sensor-card:hover {
+      transform: translateY(-5px);
+      box-shadow: 0 15px 35px rgba(0, 0, 0, 0.2);
+    }
+    .sensor-card h2 {
+      margin-bottom: 10px;
+      font-size: 1.4em;
+      color: #e0e0e0;
+    }
+    .sensor-card span {
+      font-size: 2em;
+      font-weight: bold;
+      color: #ffffff;
+    }
+  </style>
+</head>
+<body>
+  <div class="dashboard">
+    <header>
+      <h1>🌐 Smart Hill Road Safety and Traffic Management System</h1>
+      <p>Live Monitoring of Environmental and Traffic Sensors</p>
+    </header>
+    <section class="sensor-grid">
+      <div class="sensor-card"><h2>🌡 Temperature</h2><span id="temp">--</span></div>
+      <div class="sensor-card"><h2>💧 Humidity</h2><span id="humidity">--</span></div>
+      <div class="sensor-card"><h2>👆 T1 Sensor</h2><span id="t1">--</span></div>
+      <div class="sensor-card"><h2>👆 T2 Sensor</h2><span id="t2">--</span></div>
+    </section>
+  </div>
+  <script>
+    async function fetchData() {
+      const response = await fetch("/data");
+      const data = await response.json();
+      document.getElementById("temp").textContent = data.temperature + " °C";
+      document.getElementById("humidity").textContent = data.humidity + " %";
+      document.getElementById("t1").textContent = data.t1;
+      document.getElementById("t2").textContent = data.t2;
+    }
+    setInterval(fetchData, 2000);
+    fetchData();
+  </script>
+</body>
+</html>
+)rawliteral";
+
+void setup() {
+  Serial.begin(115200);
+  dht.begin();
+
+  // Setup LEDs
+  pinMode(LED1, OUTPUT);
+  pinMode(LED2, OUTPUT);
+  pinMode(LED3, OUTPUT);
+  pinMode(LED4, OUTPUT);
+
+  // Start WiFi AP
+  WiFi.softAP(ssid, password);
+  Serial.print("ESP32 AP IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  // Serve HTML page
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", index_html);
+  });
+
+  // Serve sensor data as JSON
+  server.on("/data", HTTP_GET, [](AsyncWebServerRequest *request){
+    String json = "{";
+    json += "\"temperature\":" + String(temperature, 1) + ",";
+    json += "\"humidity\":" + String(humidity, 1) + ",";
+    json += "\"t1\":\"" + t1State + "\",";
+    json += "\"t2\":\"" + t2State + "\"}";
+    request->send(200, "application/json", json);
+  });
+
+  server.begin();
+}
+
+void loop() {
+  // --- Read DHT11 Sensor ---
+  temperature = dht.readTemperature();
+  humidity = dht.readHumidity();
+
+  if (isnan(temperature) || isnan(humidity)) {
+    Serial.println("DHT11 reading failed!");
+    temperature = 0;
+    humidity = 0;
+  }
+
+  // --- Read Touch Sensors ---
+  int tPad1Value = touchRead(touchPad1);
+  int tPad2Value = touchRead(touchPad2);
+
+  t1State = (tPad1Value < TOUCH_THRESHOLD) ? "Touched" : "Not Touched";
+  t2State = (tPad2Value < TOUCH_THRESHOLD) ? "Touched" : "Not Touched";
+
+  // --- LED Control ---
+  if (tPad1Value < TOUCH_THRESHOLD) {
+    digitalWrite(LED1, HIGH);
+    digitalWrite(LED2, LOW);
+    digitalWrite(LED4, HIGH);
+  } else {
+    digitalWrite(LED1, LOW);
+    digitalWrite(LED2, HIGH);
+    digitalWrite(LED4, LOW);
+  }
+
+  if (tPad2Value < TOUCH_THRESHOLD) {
+    digitalWrite(LED3, HIGH);
+    digitalWrite(LED4, LOW);
+    digitalWrite(LED2, HIGH);
+  } else {
+    digitalWrite(LED3, LOW);
+    digitalWrite(LED4, HIGH);
+    if (tPad1Value >= TOUCH_THRESHOLD) {
+      digitalWrite(LED2, LOW);
+    }
+  }
+
+  delay(2000); // update every 2s
+}
